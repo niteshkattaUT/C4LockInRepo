@@ -16,6 +16,9 @@ recording_active_line: null
 led_a_nm: 760
 led_b_nm: 850
 switch_after_periods: 11
+led_power_mw: null
+expected_acdc: 0.01
+ppg_snr_target: 10.0
 rois:
   vessel:
   - 256
@@ -74,5 +77,4 @@ sim_driver_phase_rad:
 sim_reset_miss_prob: 0.0
 sim_sync_miss_prob: 0.0
 sim_gap_s: 0.002
-sim_link_mb_s: 115.0
 sim_seed: 1

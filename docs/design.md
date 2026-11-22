@@ -15,7 +15,7 @@ feature description (ftrDesc v1.12.0, installed at `C:\Program Files\C4Utility\d
 | Pipelining | `TransferQueueMaxBlockCount` > 1 lets the camera record the next burst while the last one transfers | Use the freerunning pattern from `c4IntensityPipelinedFreerunning.py` |
 | Time constant | 1 to 100 periods (`LockInTargetTimeConstantNPeriods`) plus 0 to 100 blank periods (`LockInTargetBlankDurationNPeriods`) | Blank periods give the LEDs a dead time to switch between frames |
 | Frame rate limit | f_lim = 4960 Hz in the manual's formula | Not a concern at a 1 kHz carrier |
-| Image size | 542 x 512 px, fixed (Height/Width read-only, no ROI); Mono16 | About 1.1 MB per frame (I and Q). 100 fps is about 111 MB/s, right at the GigE limit. |
+| Image size | 542 x 512 px, fixed (Height/Width read-only, no ROI); Mono16 | 1.1 MB per frame (I and Q) in host RAM. On the wire the Heliotis calculator uses 64/3 bits per pixel at 800 Mbit/s: 7.40 ms per frame, ~108 fps maximum with its +-25 % margin (section 3a). |
 | Data scaling | Raw value = `img.data % 2**15 // 4`, 10-bit, centred near 512 | Same conversion as the Heliotis examples |
 | Timing metadata | `ChunkTimestamp` (ns, at FrameStart) and `ChunkFrameID` via chunk mode | Use these to detect gaps between bursts |
 | Real-time outputs | `LockInReference`, `LockInFrameSync` (rising edge at the centre of each frame), `RecordingActive`, `FrameActive` on RTIO2/RTIO3; ~1 µs latency | The LED controller can follow the camera's own clock |
@@ -63,8 +63,8 @@ be unusable. The camera averages the external reference before each recording, a
 ## 3. Camera configuration
 
 Start with a 1 kHz internal reference and 20 demodulated periods plus 2 blank periods
-per frame. That gives 22 ms frames (about 45 fps, about 23 fps per wavelength) and
-roughly 50 MB/s over GigE, safely below the link limit. All values sit in one
+per frame. That gives 22 ms frames (about 45 fps, about 23 fps per wavelength), 269 Mbit/s
+on the link (34 % busy, 42 % worst case) and 50 MB/s unpacked into host RAM. All values sit in one
 `Config` dataclass ([c4ppg/config.py](../c4ppg/config.py)) so they can be changed without
 editing code (`--config file.yaml`, `--set key=value`).
 
@@ -93,6 +93,31 @@ ftrDesc 6.7: `LineSource` requires `LineMode = Output`. `C4Camera.route()` sets 
 `configure()` reads back and logs every actual value (`LockInActual*`, `FrameRate`,
 `DeviceFirmwareVersion`, `SensorName`, temperatures) and stores it in each saved file.
 The camera rounds targets to what its 80 MHz clock allows.
+
+## 3a. Real-time feasibility (Heliotis C4 calculator)
+
+`c4ppg/feasibility.py` is the Heliotis spreadsheet `C4_calculator_20240712_S4_S3.xlsx` in code (tests
+reproduce every number in it), extended with the blank periods. `python -m c4ppg plan` runs it on the
+current config without a camera; `check` and `live` run it too, and `live` refuses settings that cannot
+stream (override with `--force`).
+
+* Frame: `tf = (Np + n_blank + bs) / fd`, with bs = 1 for AC coupling.
+* Raw I/Q transfer: `tt = 64/3 * 542 * 512 * Nf / 8e8` s = 7.40 ms per frame.
+* **Streaming rule:** a pipelined burst must transfer (+25 % margin) faster than the next one is acquired.
+  Both scale with Nf, so the rule is on the frame, not the burst: `tf >= 9.25 ms` (<= 108 fps).
+  The burst length then only sets latency (one burst + its transfer) and RAM per burst.
+* PPG: per-wavelength rate `1/(2 tf)` must be above twice the upper band edge (tf <= 50 ms for 5 Hz).
+* Photon budget per LED: full well per quarter period must stay below 50 %. At 1 kHz the quarter
+  period is 250 us, so only ~0.24 mW (760 nm) / ~0.36 mW (850 nm, QE extrapolated) may reach the whole
+  pixel array in DC coupling, ~30x more with AC coupling. A 400-px ROI reaches PPG SNR 10 per frame
+  at AC/DC 1 % with ~1.5 uW. Set `led_power_mw` once measured. The spreadsheet has no
+  `LockInSensitivity` term.
+
+| Setting | Frame | Link busy | Verdict |
+|---|---|---|---|
+| 1 kHz, 20 + 2 periods (default) | 22 ms | 34 % (42 % worst) | streams |
+| 1 kHz, 8 + 2 periods | 10 ms | 74 % (93 % worst) | streams, no headroom |
+| 10 kHz, 10 + 0 (beat test) | 1 ms | 740 % | single bursts only |
 
 ## 4. Software architecture
 

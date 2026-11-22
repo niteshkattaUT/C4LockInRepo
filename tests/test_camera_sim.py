@@ -93,8 +93,8 @@ def test_no_pipelining_gives_transfer_gap(small_cfg):
     (_, a), (_, b) = cam.fetch_burst(), cam.fetch_burst()
     cam.stop()
     gap = (b.t0_ns - a.t0_ns) * 1e-9 - 40 * 0.022
-    nbytes = 2 * 40 * 96 * 96 * 2
-    assert gap == pytest.approx(nbytes / (small_cfg.sim_link_mb_s * 1e6), rel=1e-6)
+    from c4ppg.feasibility import transfer_time_s
+    assert gap == pytest.approx(transfer_time_s(40, 96, 96), rel=1e-6)
     cam.close()
 
 

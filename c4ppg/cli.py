@@ -71,8 +71,10 @@ def cmd_check(args) -> int:
     try:
         a = cam.configure()
         _print_actual(a)
-        mb_s = 2 * a["burst_frames"] * a["height"] * a["width"] * 2 / (a["burst_frames"] / a["frame_rate"]) / 1e6
-        print(f"  raw data rate      {mb_s:.0f} MB/s (GigE limit ~115 MB/s)")
+        from .feasibility import plan
+        p = plan(cfg, (a["height"], a["width"]))
+        print(f"  link               {p.wire_mbit_s:.0f} Mbit/s of 800 ({p.link_util * 100:.0f} % busy), "
+              f"host {p.host_mb_s:.0f} MB/s unpacked")
         ok = True
         print("\nBuild step 1 - connect and configure:")
         for name, passed, txt in check_actuals(cfg, a):
@@ -81,9 +83,33 @@ def cmd_check(args) -> int:
         print(f"  routed: {cfg.frame_sync_line}=LockInFrameSync, {cfg.reference_line}=LockInReference"
               + (f", {cfg.recording_active_line}=RecordingActive" if cfg.recording_active_line
                  else "  (RecordingActive: no DIO line chosen yet)"))
-        return 0 if ok else 1
+        print()
+        print("Streaming (Heliotis calculator):")
+        for ch in p.checks:
+            tag = ("PASS" if ch.ok else "FAIL") if ch.hard else ("ok" if ch.ok else "WARN")
+            print(f"  [{tag}] {ch.name}: {ch.detail}")
+        return 0 if ok and p.ok else 1
     finally:
         cam.close()
+
+
+def cmd_plan(args) -> int:
+    """Offline: is this configuration real-time capable?  No camera needed."""
+    from .feasibility import calculator, format_plan, plan
+    cfg = _cfg(args)
+    if args.spreadsheet:
+        b = calculator()
+        print("Spreadsheet defaults (fd 10 kHz, Np 100, Nf 900, bs 1, 45 mW, 700 nm, S40U):")
+        for k in ("tf_us", "tv_s", "tt_rawiq_s", "tt_amp_s", "Npe", "fullwell_fill_pct", "noise_cnt",
+                  "racdc_frame", "racdc_volume", "snr_frame", "snr_volume"):
+            print(f"  {k:<18} {getattr(b, k):.6g}")
+        print()
+    shape = tuple(cfg.sim_shape) if (args.sim and cfg.sim_shape) else (542, 512)
+    p = plan(cfg, shape, args.proc_ms / 1e3 if args.proc_ms else None)
+    print(format_plan(cfg, p))
+    print()
+    print(f"VERDICT: {'real-time capable' if p.ok else 'NOT real-time capable with these settings'}")
+    return 0 if p.ok else 1
 
 
 def cmd_beat(args) -> int:
@@ -155,6 +181,16 @@ def cmd_live(args) -> int:
         actual = cam.configure()
         _print_actual(actual)
         log.info("actual %s", actual)
+        from .feasibility import plan
+        pl = plan(cfg, (actual["height"], actual["width"]))
+        bad = [c for c in pl.checks if not c.ok]
+        for c in bad:
+            msg = f"{'NOT REAL-TIME' if c.hard else 'note'}: {c.name}: {c.detail}"
+            print(msg)
+            log.warning(msg)
+        if not pl.ok and not args.force:
+            print("These settings cannot stream in real time (see `python -m c4ppg plan`). Use --force to run anyway.")
+            return 2
         controller = make_controller(cfg.controller, cfg.controller_baud,
                                      cam.ia.sim.controller if args.sim else None)
         if not args.sim:
@@ -237,6 +273,12 @@ def main(argv=None) -> int:
     _common(p)
     p.set_defaults(fn=cmd_check)
 
+    p = sub.add_parser("plan", help="real-time feasibility of the config (Heliotis calculator), no camera needed")
+    _common(p)
+    p.add_argument("--proc-ms", type=float, help="measured host processing time per burst (from a live summary)")
+    p.add_argument("--spreadsheet", action="store_true", help="also print the spreadsheet's own example numbers")
+    p.set_defaults(fn=cmd_plan)
+
     p = sub.add_parser("beat", help="build step 2: internal LED module beat test")
     _common(p)
     p.add_argument("--ref", type=float, default=10000.0, help="reference frequency (Hz)")
@@ -252,6 +294,7 @@ def main(argv=None) -> int:
     p.add_argument("--no-view", action="store_true", help="headless (e.g. 5-minute streaming test)")
     p.add_argument("--no-save", action="store_true", help="do not write raw HDF5")
     p.add_argument("--no-offset", action="store_true", help="skip the offset map (use nominal 512)")
+    p.add_argument("--force", action="store_true", help="run even if the settings fail the real-time checks")
     p.set_defaults(fn=cmd_live)
 
     p = sub.add_parser("reprocess", help="rebuild traces and R from a saved HDF5 session")

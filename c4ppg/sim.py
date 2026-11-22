@@ -28,6 +28,7 @@ import numpy as np
 
 from .config import RAW_MID, SENSOR_SHAPE, Config
 from .controller import LedControllerModel
+from .feasibility import transfer_time_s
 
 CLOCK_HZ = 80e6
 
@@ -369,16 +370,16 @@ class SimCamera:
         k = self._burst_k
         # camera-time start of burst k: after the previous burst plus dead time, and only
         # once a transfer block is free (block k-Q has been fetched by the host).
-        nbytes = 2 * N * self.shape[0] * self.shape[1] * 2
+        tt = transfer_time_s(N, self.shape[1], self.shape[0])    # Heliotis calculator link model
         if self._prev_end is None:
             start = 0.0
         else:
-            start = self._prev_end + (self.cfg.sim_gap_s if Q > 1 else nbytes / (self.cfg.sim_link_mb_s * 1e6))
+            start = self._prev_end + (self.cfg.sim_gap_s if Q > 1 else tt)
             if Q > 1 and k - Q >= 0:
                 start = max(start, self._fetch_times[k - Q])
         end = start + dur
         # block the caller until the burst is complete (+ transfer) in scaled wall time
-        ready = end + (nbytes / (self.cfg.sim_link_mb_s * 1e6) if Q > 1 else 0.0)
+        ready = end + (tt if Q > 1 else 0.0)
         data = self._render(start, N, T, a)          # render first: costs host time, not camera time
         wait = self._scaled(ready) - (time.perf_counter() - self._start_wall)
         if wait > timeout:

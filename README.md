@@ -43,6 +43,7 @@ Every command accepts `--sim` (simulated camera and LED controller), `--config m
 
 | Command | What it does |
 |---|---|
+| `python -m c4ppg plan` | Real-time feasibility of the config (Heliotis C4 calculator): link load, frame/burst timing, PPG Nyquist, photon budget and allowed LED power, burst-size table. No camera needed |
 | `python -m c4ppg check` | Build step 1: configure and print the read-back actual values with PASS/FAIL (reference ≈ 1000 Hz, 20 + 2 periods, ≈ 45 fps) |
 | `python -m c4ppg beat [--plot]` | Build step 2: internal LED module 25 Hz off a 10 kHz reference; checks the 25 Hz beat in I/Q (like `c4DemodSimple.py`) |
 | `python -m c4ppg live` | Records the offset map (controller in OFFSET mode), then live view + raw HDF5. Options: `--duration S`, `--bursts N`, `--no-view`, `--no-save`, `--no-offset` |
@@ -66,6 +67,19 @@ shows drops, gaps between bursts, clipped/flat pixel counts and the A/B alternat
 * `_traces.csv` (ROI amplitude per frame and wavelength) and `_bursts.csv` (checks and R per burst)
 * `_ppg.png` (summary plot), `_view.png` (last live view) and `.log`
 
+## Real-time feasibility
+
+`python -m c4ppg plan` evaluates the config with the Heliotis C4 calculator (`c4ppg/feasibility.py`;
+the tests reproduce every number in `C4_calculator_20240712_S4_S3.xlsx`). The key rule is that the
+camera can stream back to back only if one frame takes at least 1.25 x 7.40 ms = 9.25 ms (link time
+plus the spreadsheet's 25 % margin), i.e. <= 108 fps. The default 22 ms frames use 34 % of the link.
+The burst length then only trades latency against RAM. `live` refuses settings that fail
+(`--force` overrides) and the simulator uses the same link model for its transfer timing.
+
+The photon budget shows how much light each LED may put on the sensor: at a 1 kHz carrier only about
+0.24 mW (760 nm) over the whole array before 50 % full well in DC coupling. Set `led_power_mw` once
+you have measured it.
+
 ## LED controller
 
 [firmware/led_controller/led_controller.ino](firmware/led_controller/led_controller.ino) is a Teensy 4.x
@@ -78,6 +92,7 @@ A/B (one LED), X (off) and S\<n> (switch delay).
 
 ```
 c4ppg/
+  feasibility.py Heliotis C4 calculator + streaming rules (`plan`)
   config.py      every tunable value (Config dataclass) + validation + YAML/--set overrides
   camera.py      C4Camera: configure(), read_actuals(), fetch_burst() on Harvesters
   sim.py         FakeHarvester: spec-checked node map + fundus phantom with known R

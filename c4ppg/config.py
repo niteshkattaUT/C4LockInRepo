@@ -44,6 +44,10 @@ class Config:
     led_a_nm: int = 760                  # LED enabled in even frames (controller resets to A)
     led_b_nm: int = 850                  # LED enabled in odd frames
     switch_after_periods: int = 11       # controller: LockInReference edges after FrameSync before switching
+    led_power_mw: Optional[tuple] = None # peak light power on the whole pixel array per LED (A, B) in mW, once
+                                         # measured; None -> `plan` reports the allowed power range instead
+    expected_acdc: float = 0.01          # expected PPG AC/DC (pulsation depth), for the SNR estimate in `plan`
+    ppg_snr_target: float = 10.0         # wanted PPG SNR per frame for the ROI mean (first ROI in `rois`)
 
     # ---- processing ----------------------------------------------------------------------
     rois: dict = field(default_factory=lambda: {"vessel": [256, 276, 230, 250],
@@ -95,7 +99,6 @@ class Config:
     sim_reset_miss_prob: float = 0.0     # per burst: controller misses the RecordingActive reset
     sim_sync_miss_prob: float = 0.0      # per frame: controller misses a FrameSync edge -> A/B pattern breaks
     sim_gap_s: float = 0.002             # camera dead time between pipelined bursts
-    sim_link_mb_s: float = 115.0         # GigE payload rate (sets the gap when queue_blocks = 1)
     sim_seed: int = 1
 
     # ------------------------------------------------------------------------------------
