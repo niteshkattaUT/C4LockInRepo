@@ -56,7 +56,8 @@ class Stats:
             return dict(
                 bursts=self.bursts, dropped_raw=self.dropped_raw, dropped_write=self.dropped_write,
                 timeouts=self.timeouts, written=self.written, write_mb=round(self.write_bytes / 1e6, 1),
-                gap_ms_mean=float(np.nanmean(g) * 1e3), gap_ms_max=float(np.nanmax(g) * 1e3),
+                gap_ms_mean=float(np.mean(g) * 1e3) if self.gaps_s else float("nan"),
+                gap_ms_max=float(np.max(g) * 1e3) if self.gaps_s else float("nan"),
                 gaps_n=len(self.gaps_s), frame_id_jumps=self.frame_id_jumps,
                 alternation=dict(self.alternation), swapped=self.swapped,
                 last_clipped=self.last_clipped, last_flat=self.last_flat,

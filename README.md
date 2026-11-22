@@ -59,6 +59,8 @@ Try it now without hardware:
 .venv\Scripts\python -m c4ppg live --sim
 ```
 
+![Live view at 1 kHz (simulated camera)](docs/images/live_view_1khz.png)
+
 **Live view:** drag on the 760 nm image to set the `vessel` ROI and on the 850 nm image to set the
 `background` ROI. Press `1`–`9` to choose which ROI's traces are shown and `q` to quit. The status line
 shows drops, gaps between bursts, clipped/flat pixel counts and the A/B alternation state.
@@ -76,6 +78,8 @@ frame targets within the camera's 100 + 100 period limit) unless you pin `n_peri
 Switching in the window starts a new file and re-records the offset map. `python -m c4ppg plan` prints a
 table of all preset carriers; continuous streaming works up to ~21.6 kHz, faster carriers need
 `allow_link_limited: true` and short bursts (see [docs/design.md](docs/design.md) section 3b).
+
+![Same session after picking 20 kHz in the carrier selector](docs/images/live_view_20khz.png)
 
 ## Real-time feasibility
 
