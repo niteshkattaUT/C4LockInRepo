@@ -20,10 +20,12 @@ import numpy as np
 ROI_COLORS = ["#00e5ff", "#ffd400", "#ff4fd8", "#7CFC00", "#ff8c00", "#ffffff"]
 
 
-def run_viewer(session, stop_evt: threading.Event, title: str = "heliCam C4 two-LED PPG", snapshot: str = None):
+def run_viewer(session, stop_evt: threading.Event, title: str = "heliCam C4 two-LED PPG", snapshot: str = None,
+               carriers=(), carrier: float = None):
+    """Blocks until the window closes / q / stop_evt.  Returns a newly picked carrier (Hz) or None."""
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
-    from matplotlib.widgets import RectangleSelector
+    from matplotlib.widgets import RadioButtons, RectangleSelector
 
     cfg = session.cfg
     proc = session.processor
@@ -32,8 +34,10 @@ def run_viewer(session, stop_evt: threading.Event, title: str = "heliCam C4 two-
 
     plt.ion()
     fig = plt.figure(figsize=(13, 8.5))
+    if carrier:
+        title = f"{title}  -  carrier {carrier / 1e3:g} kHz"
     fig.canvas.manager.set_window_title(title)
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.15, 1], hspace=0.28, wspace=0.18)
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.15, 1], hspace=0.28, wspace=0.22, right=0.80, left=0.06)
     ax_a, ax_b = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
     ax_tr, ax_r = fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[1, 1])
     status = fig.text(0.01, 0.985, "waiting for the first burst ...", va="top", family="monospace", fontsize=9)
@@ -101,6 +105,27 @@ def run_viewer(session, stop_evt: threading.Event, title: str = "heliCam C4 two-
                 draw_rois(proc.proc.rois)
 
     fig.canvas.mpl_connect("key_press_event", on_key)
+
+    # carrier selector: picking another one ends this run and restarts at the new carrier
+    picked = {"carrier": None}
+    radio = None
+    if carriers and carrier:
+        freqs = sorted(set(float(f) for f in carriers) | {float(carrier)})
+        labels = [f"{f / 1e3:g} kHz" for f in freqs]
+        rax = fig.add_axes([0.885, 0.62, 0.11, 0.035 * len(freqs) + 0.03])
+        rax.set_title("carrier", fontsize=9)
+        radio = RadioButtons(rax, labels, active=freqs.index(float(carrier)))
+
+        def on_carrier(label):
+            f = freqs[labels.index(label)]
+            if f != float(carrier):
+                picked["carrier"] = f
+                status.set_text(f"switching to {label}: stopping, reconfiguring, new offset map ...")
+                status.set_color("navy")
+                fig.canvas.draw_idle()
+                stop_evt.set()
+        radio.on_clicked(on_carrier)
+        fig.text(0.885, 0.60, "restarts acquisition\n(new file + offset map)", fontsize=7, va="top", color="0.4")
     plt.show(block=False)
     first = True
     while not stop_evt.is_set() and plt.fignum_exists(fig.number):
@@ -157,5 +182,6 @@ def run_viewer(session, stop_evt: threading.Event, title: str = "heliCam C4 two-
     stop_evt.set()
     if snapshot and plt.fignum_exists(fig.number):
         fig.savefig(snapshot, dpi=110)
-    del selectors
+    del selectors, radio
     plt.close(fig)
+    return picked["carrier"]

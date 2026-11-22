@@ -37,7 +37,12 @@ def _json(o) -> str:
 
 def session_path(save_dir: str, prefix: str = "c4ppg") -> str:
     os.makedirs(save_dir, exist_ok=True)
-    return os.path.join(save_dir, time.strftime(f"{prefix}_%Y%m%d_%H%M%S.h5"))
+    stem = os.path.join(save_dir, time.strftime(f"{prefix}_%Y%m%d_%H%M%S"))
+    cand, k = stem, 0
+    while os.path.exists(cand + ".h5") or os.path.exists(cand + ".log"):   # two runs in the same second
+        k += 1
+        cand = f"{stem}_{k}"
+    return cand + ".h5"
 
 
 class SessionWriter:

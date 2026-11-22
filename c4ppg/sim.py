@@ -330,6 +330,7 @@ class SimCamera:
     def _reset_clock(self):
         self._burst_k = 0
         self._prev_end = None
+        self._link_free = 0.0
         self._fetch_times: list[float] = []
         self._start_wall = None
 
@@ -378,8 +379,9 @@ class SimCamera:
             if Q > 1 and k - Q >= 0:
                 start = max(start, self._fetch_times[k - Q])
         end = start + dur
-        # block the caller until the burst is complete (+ transfer) in scaled wall time
-        ready = end + (tt if Q > 1 else 0.0)
+        # block the caller until the burst is complete and transferred; the link carries one burst at a time
+        ready = (max(end, self._link_free) + tt) if Q > 1 else end
+        self._link_free = ready
         data = self._render(start, N, T, a)          # render first: costs host time, not camera time
         wait = self._scaled(ready) - (time.perf_counter() - self._start_wall)
         if wait > timeout:
@@ -429,8 +431,9 @@ class SimCamera:
             # amp = base * (1 - depth * pulse) = base - base_depth * pulse
             for c, trig in ((0, np.cos(phase)), (1, np.sin(phase))):
                 out = IQ[c, j]
-                self.rng.standard_normal((H, W), dtype=np.float32, out=out)
-                out *= st["noise"]
+                # white noise from a bank of pre-drawn frames, picked at random with random sign: the
+                # per-frame sequence stays white, at a fraction of the cost of fresh normals
+                np.multiply(self._noise_frame(), st["noise"], out=out)
                 out += st["off"][c]
                 if st["base"] is not None:
                     out += st["base"] * np.float32(trig)
@@ -446,6 +449,13 @@ class SimCamera:
         enc <<= 2
         enc |= np.uint16(0x8000)
         return [_Component(enc[i]) for i in range(enc.shape[0])]
+
+    def _noise_frame(self) -> np.ndarray:
+        if getattr(self, "_bank", None) is None:
+            self._bank = self.rng.standard_normal((48, *self.shape), dtype=np.float32)
+            self._bank_neg = -self._bank
+        k = int(self.rng.integers(0, 96))
+        return self._bank[k // 2] if k % 2 else self._bank_neg[k // 2]
 
     def _static(self, led, mod: bool, sens: float, ac: bool) -> dict:
         """Per-LED maps that do not change from frame to frame (cached)."""

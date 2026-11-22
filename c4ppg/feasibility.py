@@ -222,7 +222,11 @@ class Plan:
     host_mb_s: float                 # unpacked 16-bit I/Q into RAM / disk
     wire_mbit_s: float
     checks: list = field(default_factory=list)
-    budgets: dict = field(default_factory=dict)   # wavelength -> Budget (per LED)
+    budgets: dict = field(default_factory=dict)   # wavelength -> (Budget, limits, power)
+    mode: str = "continuous"         # "continuous" | "link-limited"
+    gap_s: float = 0.0               # camera idle time per burst (link-limited, worst case)
+    avg_fps: float = 0.0             # average delivered frame rate
+    max_burst_link_limited: int = 0  # largest burst whose gap stays <= max_gap_ms
 
     @property
     def ok(self) -> bool:
@@ -245,9 +249,32 @@ def plan(cfg: Config, shape=(542, 512), proc_s_per_burst: Optional[float] = None
              wire_mbit_s=LINK_BITS_PER_PX * npx * npy / tf / 1e6)
     c = p.checks
     tf_min = transfer_time_s(1, npx, npy) * (1 + LINK_MARGIN)
-    c.append(Check("link keeps up (transfer +25 % <= acquisition)", worst <= 1.0,
-                   f"burst transfer {tt * 1e3:.0f} ms vs acquisition {tv * 1e3:.0f} ms: link {util * 100:.0f} % "
-                   f"busy ({worst * 100:.0f} % worst case); needs frame >= {tf_min * 1e3:.2f} ms, have {tf * 1e3:.2f} ms"))
+    p.avg_fps = p.fps
+    if worst <= 1.0:
+        c.append(Check("link keeps up (transfer +25 % <= acquisition)", True,
+                       f"burst transfer {tt * 1e3:.0f} ms vs acquisition {tv * 1e3:.0f} ms: link {util * 100:.0f} % "
+                       f"busy ({worst * 100:.0f} % worst case); needs frame >= {tf_min * 1e3:.2f} ms, "
+                       f"have {tf * 1e3:.2f} ms"))
+    else:
+        # frames shorter than their link time: the camera records a burst, then waits for the link
+        p.mode = "link-limited"
+        p.gap_s = N * tf_min - tv
+        p.avg_fps = 1.0 / tf_min
+        per_frame_gap = tf_min - tf
+        nmax = int(cfg.max_gap_ms / 1e3 / per_frame_gap) // 2 * 2
+        p.max_burst_link_limited = nmax if nmax >= 4 else 0
+        f_cont = 200.0 / tf_min          # 100 + 100 periods at the longest possible frame
+        detail = (f"frame {tf * 1e3:.2f} ms < link time {tf_min * 1e3:.2f} ms: the camera records {N} frames in "
+                  f"{tv * 1e3:.0f} ms, then waits ~{p.gap_s * 1e3:.0f} ms for the link; average {p.avg_fps:.0f} fps")
+        if cfg.allow_link_limited:
+            c.append(Check(f"link-limited bursts: gap <= {cfg.max_gap_ms:g} ms", p.gap_s * 1e3 <= cfg.max_gap_ms,
+                           detail + (f"; use burst_frames <= {p.max_burst_link_limited}" if p.max_burst_link_limited
+                                     else "; no burst size gets the gap that short")))
+        else:
+            c.append(Check("link keeps up (transfer +25 % <= acquisition)", False,
+                           detail + f". Continuous streaming needs a carrier <= {f_cont / 1e3:.1f} kHz "
+                           f"(max 100 + 100 periods per frame), or set allow_link_limited: true"
+                           + (f" with burst_frames <= {p.max_burst_link_limited}" if p.max_burst_link_limited else "")))
     c.append(Check("pipelining on (TransferQueueMaxBlockCount >= 2)", cfg.queue_blocks >= 2,
                    f"queue_blocks = {cfg.queue_blocks}"
                    + ("" if cfg.queue_blocks >= 2 else
@@ -255,8 +282,9 @@ def plan(cfg: Config, shape=(542, 512), proc_s_per_burst: Optional[float] = None
     c.append(Check("burst size legal (even, 4..900)", 4 <= N <= 900 and N % 2 == 0, f"{N} frames"))
     c.append(Check("frame rate below f_lim", p.fps <= F_LIM_HZ, f"{p.fps:.1f} fps (f_lim {F_LIM_HZ:g})"))
     hi = cfg.ppg_band_hz[1]
-    c.append(Check("PPG band below per-wavelength Nyquist", hi < fs / 2,
-                   f"{fs:.2f} Hz per wavelength -> Nyquist {fs / 2:.2f} Hz, band to {hi:g} Hz"))
+    fs_eff = p.avg_fps / 2
+    c.append(Check("PPG band below per-wavelength Nyquist", hi < fs_eff / 2,
+                   f"{fs_eff:.2f} Hz per wavelength -> Nyquist {fs_eff / 2:.2f} Hz, band to {hi:g} Hz"))
     c.append(Check("PPG window holds several bursts", cfg.ppg_window_s >= 2 * tv,
                    f"window {cfg.ppg_window_s:g} s, burst {tv:.2f} s", hard=False))
     c.append(Check("live latency <= 5 s", p.latency_s <= 5.0,
@@ -328,6 +356,8 @@ def power_limits(cfg: Config, wavelength_nm: float, roi_px: int, sensor: str = "
         for _ in range(200):
             mid = math.sqrt(lo * hi)
             lo, hi = (mid, hi) if bud(mid).snr_frame < target else (lo, mid)
+            if hi / lo < 1.0001:
+                break
         p_min = hi
     return {"p_max_mw": p_max, "p_min_mw": p_min}
 
@@ -343,9 +373,41 @@ def burst_options(cfg: Config, sizes=(10, 20, 50, 100, 200, 450, 900), shape=(54
     return out
 
 
-def format_plan(cfg: Config, p: Plan) -> str:
-    L = [f"Frame {p.tf_s * 1e3:.2f} ms ({p.fps:.2f} fps, {p.fs_per_wavelength:.2f} Hz per wavelength), "
-         f"burst {cfg.burst_frames} frames = {p.tv_s:.3f} s, transfer {p.tt_s:.3f} s",
+def carrier_table(cfg: Config, freqs=None, shape=(542, 512)) -> list[dict]:
+    """What each carrier means with the frame timing derived from it (integration_ms / frame_ms)."""
+    rows = []
+    for f in (freqs or cfg.carrier_presets_hz):
+        c = cfg.with_carrier(f)
+        p = plan(c, shape)
+        lims = [p.budgets[nm][1]["p_max_mw"] for nm in (c.led_a_nm, c.led_b_nm)]
+        if p.mode == "continuous":
+            verdict = "streams" if p.ok else "FAILS"
+        else:
+            verdict = (f"bursts <= {p.max_burst_link_limited} frames" if p.max_burst_link_limited
+                       else "too fast") + ("" if c.allow_link_limited else " (allow_link_limited)")
+        rows.append(dict(freq_hz=f, n_periods=c.n_periods, n_blank=c.n_blank, switch_after=c.switch_after_periods,
+                         integration_ms=c.n_periods / f * 1e3, frame_ms=p.tf_s * 1e3, avg_fps=p.avg_fps,
+                         link_pct=min(p.link_util, 1 / (1 + LINK_MARGIN)) * 100, mode=p.mode, verdict=verdict,
+                         pmax_a_mw=lims[0], pmax_b_mw=lims[1], ok=p.ok))
+    return rows
+
+
+def format_carrier_table(cfg: Config, rows: list[dict]) -> str:
+    L = [f"Carrier choices (integration {cfg.integration_ms:g} ms / frame {cfg.frame_ms:g} ms targets, "
+         f"camera max 100 + 100 periods):",
+         "   carrier  periods+blank  switch  integr_ms  frame_ms  avg_fps  max mW A/B (50% FW)   verdict"]
+    for r in rows:
+        L.append(f"  {r['freq_hz'] / 1e3:6.1f}k  {r['n_periods']:>6} + {r['n_blank']:<4}  {r['switch_after']:>6}  "
+                 f"{r['integration_ms']:9.2f}  {r['frame_ms']:8.2f}  {r['avg_fps']:7.1f}  "
+                 f"{r['pmax_a_mw']:8.3g} / {r['pmax_b_mw']:<8.3g}  {r['verdict']}")
+    return "\n".join(L)
+
+
+def format_plan(cfg: Config, p: Plan, shape=(542, 512)) -> str:
+    L = [f"Carrier {cfg.ref_freq_hz / 1e3:g} kHz: {cfg.n_periods} + {cfg.n_blank} periods, LED switch after "
+         f"{cfg.switch_after_periods} periods ({'derived' if cfg.timing_auto else 'pinned'})",
+         f"Frame {p.tf_s * 1e3:.2f} ms ({p.fps:.2f} fps, {p.fs_per_wavelength:.2f} Hz per wavelength), "
+         f"burst {cfg.burst_frames} frames = {p.tv_s:.3f} s, transfer {p.tt_s:.3f} s, mode {p.mode}",
          f"Link {p.wire_mbit_s:.0f} Mbit/s of 800 ({p.link_util * 100:.0f} %, {p.link_util_worst * 100:.0f} % worst case), "
          f"host {p.host_mb_s:.0f} MB/s unpacked; max streaming {max_streaming_fps():.0f} fps",
          ""]
@@ -369,7 +431,7 @@ def format_plan(cfg: Config, p: Plan) -> str:
     L.append("")
     L.append(f"Burst size options at these frame settings:")
     L.append("   frames  burst_s  transfer_s  latency_s  link_%  RAM_MB  ok")
-    for o in burst_options(cfg):
+    for o in burst_options(cfg, shape=shape):
         L.append(f"   {o['frames']:>6}  {o['burst_s']:7.3f}  {o['transfer_s']:10.3f}  {o['latency_s']:9.3f}  "
                  f"{o['link_pct']:6.0f}  {o['ram_mb']:6.0f}  {'yes' if o['ok'] else 'no'}")
     return "\n".join(L)

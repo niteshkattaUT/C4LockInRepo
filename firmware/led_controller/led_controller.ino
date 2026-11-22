@@ -25,6 +25,10 @@
 //   A  LED A only, gated (build step 4)   B  LED B only, gated
 //   X  all LEDs off (default at power-up) S<n> set SWITCH_AFTER   ?  status
 //
+// Carrier: the reference interrupt runs at the carrier frequency (1 kHz default, up to tens of kHz).
+// A Teensy 4.x handles 50 kHz interrupts easily; the AND gates and LED drivers must switch cleanly at
+// the carrier (check rise/fall times on the scope - slow edges cost lock-in signal).
+//
 // Pin numbers are for a Teensy 4.x (5 V tolerant inputs need level shifting from the
 // D3's 24 V / 5 V outputs - check the heliDriver D3 data sheet for the RTIO/DIO levels).
 
@@ -36,9 +40,10 @@ const uint8_t PIN_EN_B = 6;
 const uint8_t PIN_BYPASS = 7;        // HIGH = offset mode (PWM instead of the reference gate)
 const uint8_t PIN_PWM = 8;           // 50 % PWM for offset mode
 
-volatile uint8_t switchAfter = 11;   // ~half a frame of 22 periods after the FrameSync edge
+volatile uint16_t switchAfter = 11;  // middle of the blank after the FrameSync edge; the PC sends S<n>
+                                     // when the carrier changes (11 at 1 kHz 20+2, 51 at 5..50 kHz)
 volatile bool armed = false;
-volatile uint8_t count = 0;
+volatile uint16_t count = 0;
 volatile char led = 'A';
 volatile char mode = 'X';            // X off, R run, O offset, A, B
 volatile uint32_t frames = 0, bursts = 0;
@@ -102,7 +107,7 @@ void loop() {
   switch (c) {
     case 'R': case 'O': case 'A': case 'B': case 'X':
       mode = c; led = 'A'; armed = false; applyOutputs(); break;
-    case 'S': switchAfter = (uint8_t)cmd.substring(1).toInt(); break;
+    case 'S': switchAfter = (uint16_t)cmd.substring(1).toInt(); break;
     default: break;
   }
   interrupts();

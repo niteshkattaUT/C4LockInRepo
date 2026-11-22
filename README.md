@@ -44,6 +44,7 @@ Every command accepts `--sim` (simulated camera and LED controller), `--config m
 | Command | What it does |
 |---|---|
 | `python -m c4ppg plan` | Real-time feasibility of the config (Heliotis C4 calculator): link load, frame/burst timing, PPG Nyquist, photon budget and allowed LED power, burst-size table. No camera needed |
+| `python -m c4ppg plan --carrier 20k` | Same at another carrier |
 | `python -m c4ppg check` | Build step 1: configure and print the read-back actual values with PASS/FAIL (reference ≈ 1000 Hz, 20 + 2 periods, ≈ 45 fps) |
 | `python -m c4ppg beat [--plot]` | Build step 2: internal LED module 25 Hz off a 10 kHz reference; checks the 25 Hz beat in I/Q (like `c4DemodSimple.py`) |
 | `python -m c4ppg live` | Records the offset map (controller in OFFSET mode), then live view + raw HDF5. Options: `--duration S`, `--bursts N`, `--no-view`, `--no-save`, `--no-offset` |
@@ -66,6 +67,15 @@ shows drops, gaps between bursts, clipped/flat pixel counts and the A/B alternat
 * `c4ppg_<time>.h5`: raw I/Q bursts, offset maps, all config and actual camera values
 * `_traces.csv` (ROI amplitude per frame and wavelength) and `_bursts.csv` (checks and R per burst)
 * `_ppg.png` (summary plot), `_view.png` (last live view) and `.log`
+
+## Carrier frequency
+
+Default 1 kHz; choose another with `--carrier 20k` (any command), `ref_freq_hz` in the config, or the
+**carrier selector in the live window**. Frame timing follows the carrier (20 ms integration / 22 ms
+frame targets within the camera's 100 + 100 period limit) unless you pin `n_periods` / `n_blank`.
+Switching in the window starts a new file and re-records the offset map. `python -m c4ppg plan` prints a
+table of all preset carriers; continuous streaming works up to ~21.6 kHz, faster carriers need
+`allow_link_limited: true` and short bursts (see [docs/design.md](docs/design.md) section 3b).
 
 ## Real-time feasibility
 

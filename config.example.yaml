@@ -1,8 +1,20 @@
 # Example config: every key with its default. Copy, keep only what you change, and pass with --config.
-# sim_* keys only matter with --sim.
+# n_periods / n_blank / switch_after_periods: null = derived from the carrier. sim_* keys only matter with --sim.
 ref_freq_hz: 1000.0
-n_periods: 20
-n_blank: 2
+integration_ms: 20.0
+frame_ms: 22.0
+min_blank_periods: 2
+n_periods: null
+n_blank: null
+carrier_presets_hz:
+- 1000.0
+- 2000.0
+- 5000.0
+- 10000.0
+- 20000.0
+- 50000.0
+allow_link_limited: false
+max_gap_ms: 100.0
 sensitivity: 0.15
 coupling: DC
 burst_frames: 100
@@ -15,7 +27,7 @@ reference_line: RTIO3
 recording_active_line: null
 led_a_nm: 760
 led_b_nm: 850
-switch_after_periods: 11
+switch_after_periods: null
 led_power_mw: null
 expected_acdc: 0.01
 ppg_snr_target: 10.0

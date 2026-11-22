@@ -18,19 +18,24 @@ import time
 
 import numpy as np
 
-from .config import Config, load_config
+from .config import Config, load_config, parse_frequency
 
 log = logging.getLogger("c4ppg")
 
 
 def _common(p: argparse.ArgumentParser):
     p.add_argument("--sim", action="store_true", help="use the simulated camera and LED controller")
+    p.add_argument("--carrier", help="carrier / reference frequency, e.g. 1k (default), 5k, 20k, 20000; "
+                                     "frame timing follows it unless n_periods/n_blank are pinned")
     p.add_argument("--config", help="YAML file with config overrides")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override one config value")
 
 
 def _cfg(args) -> Config:
-    return load_config(args.config, args.set)
+    cfg = load_config(args.config, args.set)
+    if getattr(args, "carrier", None):
+        cfg = cfg.replace(ref_freq_hz=parse_frequency(args.carrier))
+    return cfg
 
 
 def _print_actual(actual: dict):
@@ -106,7 +111,11 @@ def cmd_plan(args) -> int:
         print()
     shape = tuple(cfg.sim_shape) if (args.sim and cfg.sim_shape) else (542, 512)
     p = plan(cfg, shape, args.proc_ms / 1e3 if args.proc_ms else None)
-    print(format_plan(cfg, p))
+    print(format_plan(cfg, p, shape))
+    if not args.no_carriers:
+        from .feasibility import carrier_table, format_carrier_table
+        print()
+        print(format_carrier_table(cfg, carrier_table(cfg, shape=shape)))
     print()
     print(f"VERDICT: {'real-time capable' if p.ok else 'NOT real-time capable with these settings'}")
     return 0 if p.ok else 1
@@ -115,7 +124,7 @@ def cmd_plan(args) -> int:
 def cmd_beat(args) -> int:
     """Reproduce c4DemodSimple.py: internal LED module 25 Hz off the reference -> 25 Hz beat in I/Q."""
     from .camera import open_camera
-    cfg = _cfg(args).replace(ref_freq_hz=args.ref, n_periods=10, n_blank=0, burst_frames=60,
+    cfg = load_config(args.config, args.set).replace(ref_freq_hz=args.ref, n_periods=10, n_blank=0, burst_frames=60,
                              sensitivity=args.sensitivity, coupling="DC", switch_after_periods=5)
     cam = open_camera(cfg, args.sim)
     try:
@@ -153,49 +162,46 @@ def cmd_beat(args) -> int:
         cam.close()
 
 
-def cmd_live(args) -> int:
-    from .camera import open_camera
-    from .controller import make_controller
+def _realtime_problems(cfg: Config, shape) -> tuple[bool, list]:
+    from .feasibility import plan
+    pl = plan(cfg, shape)
+    return pl.ok, [c for c in pl.checks if not c.ok]
+
+
+def _live_segment(cfg: Config, cam, controller, args, t_end, max_bursts, first: bool) -> dict:
+    """One acquisition run at one carrier: configure, offset map, stream, export.  Returns
+    {'rc': exit code, 'carrier': newly selected carrier in Hz or None, 'bursts': bursts acquired}."""
     from .offline import export_session
     from .pipeline import Session, record_offset_map
     from .processing import OffsetMap
     from .storage import session_path
 
-    cfg = _cfg(args)
-    if args.sim:
-        cfg = cfg.replace(controller="sim")
-    if args.no_save:
-        cfg = cfg.replace(save_raw=False)
-    os.makedirs(cfg.save_dir, exist_ok=True)
     h5_path = session_path(cfg.save_dir) if cfg.save_raw else None
     base = os.path.splitext(h5_path or session_path(cfg.save_dir))[0]
     fh = logging.FileHandler(base + ".log", encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(threadName)s: %(message)s"))
     log.addHandler(fh)
-
-    cam = open_camera(cfg, args.sim)
-    controller = None
+    out = {"rc": 0, "carrier": None, "bursts": 0}
     session = None
-    summary = {}
     try:
+        cam.cfg = cfg
         actual = cam.configure()
-        _print_actual(actual)
+        if first:
+            _print_actual(actual)
+        print(f"\ncarrier {actual['ref_freq_hz'] / 1e3:.4g} kHz: {actual['n_periods']} + {actual['n_blank']} periods, "
+              f"{1e3 / actual['frame_rate']:.2f} ms frames, LED switch after {cfg.switch_after_periods} periods")
+        log.info("config %s", cfg.to_dict(resolved=True))
         log.info("actual %s", actual)
-        from .feasibility import plan
-        pl = plan(cfg, (actual["height"], actual["width"]))
-        bad = [c for c in pl.checks if not c.ok]
+        ok, bad = _realtime_problems(cfg, (actual["height"], actual["width"]))
         for c in bad:
             msg = f"{'NOT REAL-TIME' if c.hard else 'note'}: {c.name}: {c.detail}"
             print(msg)
             log.warning(msg)
-        if not pl.ok and not args.force:
+        if not ok and not args.force:
             print("These settings cannot stream in real time (see `python -m c4ppg plan`). Use --force to run anyway.")
-            return 2
-        controller = make_controller(cfg.controller, cfg.controller_baud,
-                                     cam.ia.sim.controller if args.sim else None)
-        if not args.sim:
-            print("\nSAFETY: before any human retinal use, check the combined LED irradiance against "
-                  "ANSI Z136 / ISO 15004-2 for both wavelengths.\n")
+            out["rc"] = 2
+            return out
+        controller.set_switch_after(cfg.switch_after_periods)
         if args.no_offset:
             offset = OffsetMap.mid_scale((actual["height"], actual["width"]))
             print("offset map: nominal 512 (no recording)")
@@ -203,25 +209,98 @@ def cmd_live(args) -> int:
             print(f"recording offset map ({cfg.offset_bursts} bursts, controller in OFFSET mode) ...")
             offset = record_offset_map(cam, controller)
             print(f"  I0 mean {offset.I0.mean():.1f}, Q0 mean {offset.Q0.mean():.1f}")
-        session = Session(cfg, cam, controller, offset, h5_path, args.bursts)
+        session = Session(cfg, cam, controller, offset, h5_path, max_bursts)
         session.start()
         print(f"streaming ({cfg.burst_frames} frames per burst, {cfg.burst_duration_s:.2f} s) - "
-              + ("close the window or press q to stop" if not args.no_view else "Ctrl+C to stop"))
+              + ("close the window or press q to stop; pick another carrier on the right" if not args.no_view
+                 else "Ctrl+C to stop"))
+        remaining = None if t_end is None else max(0.0, t_end - time.time())
         try:
             if args.no_view:
-                session.wait(args.duration)
+                session.wait(remaining)
             else:
                 from .viewer import run_viewer
-                if args.duration:
+                timer = None
+                if remaining is not None:
                     import threading
-                    threading.Timer(args.duration, session.stop_evt.set).start()
-                run_viewer(session, session.stop_evt, snapshot=base + "_view.png")
+                    timer = threading.Timer(remaining, session.stop_evt.set)
+                    timer.daemon = True
+                    timer.start()
+                choice = run_viewer(session, session.stop_evt, snapshot=base + "_view.png",
+                                    carriers=cfg.carrier_presets_hz, carrier=cfg.ref_freq_hz)
+                if timer:
+                    timer.cancel()
+                out["carrier"] = choice
         except KeyboardInterrupt:
             print("\nstopping ...")
     finally:
+        summary = session.stop() if session is not None else {}
         if session is not None:
-            summary = session.stop()
-        elif controller is not None:
+            out["bursts"] = summary.get("bursts", 0)
+            files = export_session(base, session.processor.ppg, session.processor.results, cfg,
+                                   f"{os.path.basename(base)}  ({cfg.ref_freq_hz / 1e3:g} kHz)")
+            print("\nsession summary:")
+            for k, v in summary.items():
+                print(f"  {k:<15} {v}")
+            for name, m in session.processor.ppg.compute().rois.items():
+                print(f"  R[{name}] = {m.R:.3f}   HR {m.hr_bpm:.0f} bpm")
+            print("files:")
+            for f in ([h5_path] if h5_path else []) + files + [base + ".log"]:
+                print(f"  {f}")
+            if summary.get("errors"):
+                out["rc"] = 1
+        log.removeHandler(fh)
+        fh.close()
+    return out
+
+
+def cmd_live(args) -> int:
+    """Live acquisition.  Picking another carrier in the window ends the current segment (its own HDF5
+    file, since every camera setting changes), re-derives the frame timing, re-records the offset map
+    and continues."""
+    from .camera import open_camera
+    from .controller import make_controller
+
+    cfg = _cfg(args)
+    if args.sim:
+        cfg = cfg.replace(controller="sim")
+    if args.no_save:
+        cfg = cfg.replace(save_raw=False)
+    os.makedirs(cfg.save_dir, exist_ok=True)
+    cam = open_camera(cfg, args.sim)
+    controller = None
+    rc = 0
+    t_end = time.time() + args.duration if args.duration else None
+    bursts_left = args.bursts
+    try:
+        controller = make_controller(cfg.controller, cfg.controller_baud,
+                                     cam.ia.sim.controller if args.sim else None)
+        if not args.sim:
+            print("\nSAFETY: before any human retinal use, check the combined LED irradiance against "
+                  "ANSI Z136 / ISO 15004-2 for both wavelengths.\n")
+        first = True
+        while True:
+            seg = _live_segment(cfg, cam, controller, args, t_end, bursts_left, first)
+            rc = max(rc, seg["rc"])
+            if seg["rc"] == 2 or seg["carrier"] is None:
+                break
+            if bursts_left is not None:
+                bursts_left -= seg["bursts"]
+                if bursts_left <= 0:
+                    break
+            if t_end is not None and time.time() >= t_end:
+                break
+            first = False
+            new = cfg.replace(ref_freq_hz=float(seg["carrier"]))
+            h, w = cam.actual["height"], cam.actual["width"]
+            ok, bad = _realtime_problems(new, (h, w))
+            if not ok and not args.force:
+                print(f"\ncarrier {new.ref_freq_hz / 1e3:g} kHz cannot stream: "
+                      + "; ".join(c.detail for c in bad if c.hard) + f"\nstaying at {cfg.ref_freq_hz / 1e3:g} kHz")
+            else:
+                cfg = new
+    finally:
+        if controller is not None:
             try:
                 controller.set_mode("off")
             except Exception:   # noqa: BLE001
@@ -229,20 +308,7 @@ def cmd_live(args) -> int:
         cam.close()
         if controller is not None:
             controller.close()
-    if session is not None:
-        files = export_session(base, session.processor.ppg, session.processor.results, cfg,
-                               os.path.basename(base))
-        print("\nsession summary:")
-        for k, v in summary.items():
-            print(f"  {k:<15} {v}")
-        for name, m in session.processor.ppg.compute().rois.items():
-            print(f"  R[{name}] = {m.R:.3f}   HR {m.hr_bpm:.0f} bpm")
-        print("files:")
-        for f in ([h5_path] if h5_path else []) + files + [base + ".log"]:
-            print(f"  {f}")
-    log.removeHandler(fh)
-    fh.close()
-    return 0 if not summary.get("errors") else 1
+    return rc
 
 
 def cmd_reprocess(args) -> int:
@@ -261,6 +327,8 @@ def cmd_reprocess(args) -> int:
 
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(threadName)s: %(message)s")
+    for h in logging.getLogger().handlers:      # console: warnings only; the session .log gets everything
+        h.setLevel(logging.WARNING)
     log.setLevel(logging.INFO)
     ap = argparse.ArgumentParser(prog="python -m c4ppg", description="heliCam C4 two-LED real-time PPG")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -277,6 +345,7 @@ def main(argv=None) -> int:
     _common(p)
     p.add_argument("--proc-ms", type=float, help="measured host processing time per burst (from a live summary)")
     p.add_argument("--spreadsheet", action="store_true", help="also print the spreadsheet's own example numbers")
+    p.add_argument("--no-carriers", action="store_true", help="skip the table of carrier choices")
     p.set_defaults(fn=cmd_plan)
 
     p = sub.add_parser("beat", help="build step 2: internal LED module beat test")

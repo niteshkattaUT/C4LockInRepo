@@ -119,6 +119,35 @@ stream (override with `--force`).
 | 1 kHz, 8 + 2 periods | 10 ms | 74 % (93 % worst) | streams, no headroom |
 | 10 kHz, 10 + 0 (beat test) | 1 ms | 740 % | single bursts only |
 
+## 3b. Selectable carrier
+
+The carrier (`ref_freq_hz`, default 1 kHz) can be changed with `--carrier 20k` on any command, in
+the config, or with the **carrier selector in the live window** (presets `carrier_presets_hz`). The
+frame timing follows the carrier: `n_periods` / `n_blank` / `switch_after_periods` are derived from
+`integration_ms` (20) and `frame_ms` (22) within the camera's 1..100 / 0..100 period limits, unless
+pinned in the config. The controller gets the new switch delay (`S<n>`).
+
+Picking another carrier in the window ends the current run (its own HDF5 file, since every camera
+setting changes), reconfigures the camera, re-records the offset map and continues. A carrier that
+cannot stream is refused and the run stays at the old one.
+
+| Carrier | Periods + blank | Integration | Frame | Streams? | Max light on sensor, 760 / 850 nm (DC coupling) |
+|---|---|---|---|---|---|
+| 1 kHz | 20 + 2 | 20 ms | 22 ms | yes | 0.24 / 0.36 mW |
+| 2 kHz | 40 + 4 | 20 ms | 22 ms | yes | 0.47 / 0.72 mW |
+| 5 kHz | 100 + 10 | 20 ms | 22 ms | yes | 1.2 / 1.8 mW |
+| 10 kHz | 100 + 100 | 10 ms | 20 ms | yes | 2.4 / 3.6 mW |
+| 20 kHz | 100 + 100 | 5 ms | 10 ms | yes (74 % link) | 4.7 / 7.2 mW |
+| 50 kHz | 100 + 100 | 2 ms | 4 ms | link-limited: bursts <= 18 frames | 12 / 18 mW |
+
+The limit: a frame holds at most 100 + 100 periods, and continuous streaming needs frames >= 9.25 ms,
+so **continuous streaming works up to ~21.6 kHz**. Above that the camera records a burst faster than
+the link can send it and then waits (`allow_link_limited: true`, `burst_frames` small enough that the
+gap stays below `max_gap_ms`, e.g. 18 frames at 50 kHz: 72 ms on, ~95 ms gap, 108 fps average).
+Higher carriers integrate fewer periods but allow proportionally more light (shorter quarter periods),
+and move further from 1/f noise and mains flicker harmonics. The LED drivers and AND gates must
+switch cleanly at the carrier.
+
 ## 4. Software architecture
 
 Three worker threads plus the main thread, joined by queues, so a slow plot or disk

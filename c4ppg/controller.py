@@ -106,6 +106,12 @@ class ManualController:
             self.prompt(f"Set the LED controller to {mode.upper()} mode, then press Enter ")
             self.mode = mode
 
+    def set_switch_after(self, n: int):
+        if n != getattr(self, "switch_after", None):
+            self.prompt(f"Set the LED controller switch delay to {n} reference periods (command S{n}), "
+                        f"then press Enter ")
+            self.switch_after = n
+
     def close(self):
         if self.mode not in (None, "off"):
             print("Reminder: switch the LED controller OFF.")
@@ -130,6 +136,12 @@ class SerialController:
             raise RuntimeError(f"LED controller did not acknowledge {mode!r}: {reply!r}")
         self.mode = mode
 
+    def set_switch_after(self, n: int):
+        self.ser.write(f"S{int(n)}\n".encode())
+        reply = self.ser.readline().decode(errors="replace").strip()
+        if not reply.startswith("ok"):
+            raise RuntimeError(f"LED controller did not acknowledge S{n}: {reply!r}")
+
     def close(self):
         try:
             self.set_mode("off")
@@ -151,6 +163,9 @@ class SimController:
         if mode not in MODES:
             raise ValueError(mode)
         self.model.mode = mode
+
+    def set_switch_after(self, n: int):
+        self.model.switch_after = int(n)
 
     def close(self):
         self.model.mode = "off"

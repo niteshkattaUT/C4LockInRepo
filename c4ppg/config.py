@@ -24,9 +24,19 @@ F_LIM_HZ = 4960.0                  # frame-rate limit constant for the heliCam C
 @dataclass
 class Config:
     # ---- lock-in (camera) ------------------------------------------------------------
-    ref_freq_hz: float = 1000.0          # LockInTargetReferenceFrequency (min 306 Hz)
-    n_periods: int = 20                  # LockInTargetTimeConstantNPeriods (1..100)
-    n_blank: int = 2                     # LockInTargetBlankDurationNPeriods (0..100)
+    ref_freq_hz: float = 1000.0          # carrier = LockInTargetReferenceFrequency (306 Hz .. 250 kHz)
+    # Frame timing.  Leave n_periods / n_blank / switch_after_periods empty (None) and they follow the
+    # carrier: integration_ms of demodulation and frame_ms per frame, within the camera's 1..100 /
+    # 0..100 period limits.  Give them explicit values to pin them.
+    integration_ms: float = 20.0         # target demodulation time per frame
+    frame_ms: float = 22.0               # target frame duration (the rest is blank, min min_blank_periods)
+    min_blank_periods: int = 2           # dead time for the LED switch
+    n_periods: Optional[int] = None      # LockInTargetTimeConstantNPeriods (1..100); None = from integration_ms
+    n_blank: Optional[int] = None        # LockInTargetBlankDurationNPeriods (0..100); None = from frame_ms
+    carrier_presets_hz: tuple = (1000.0, 2000.0, 5000.0, 10000.0, 20000.0, 50000.0)   # live-view selector
+    allow_link_limited: bool = False     # carriers above ~21.6 kHz: frames shorter than the 9.25 ms link time,
+                                         # so bursts come with gaps; allow it (with short bursts)
+    max_gap_ms: float = 100.0            # largest acceptable gap between bursts in link-limited mode
     sensitivity: float = 0.15            # LockInSensitivity (manual suggests ~0.2 for S40U)
     coupling: str = "DC"                 # LockInCoupling: "DC" | "AC"
     burst_frames: int = 100              # AcquisitionBurstFrameCount (even, 4..900)
@@ -43,7 +53,8 @@ class Config:
     # ---- LED / wavelength assignment -----------------------------------------------------
     led_a_nm: int = 760                  # LED enabled in even frames (controller resets to A)
     led_b_nm: int = 850                  # LED enabled in odd frames
-    switch_after_periods: int = 11       # controller: LockInReference edges after FrameSync before switching
+    switch_after_periods: Optional[int] = None   # controller: LockInReference edges after FrameSync before
+                                                 # switching; None = middle of the blank (11 at 1 kHz, 20+2)
     led_power_mw: Optional[tuple] = None # peak light power on the whole pixel array per LED (A, B) in mW, once
                                          # measured; None -> `plan` reports the allowed power range instead
     expected_acdc: float = 0.01          # expected PPG AC/DC (pulsation depth), for the SNR estimate in `plan`
@@ -102,6 +113,34 @@ class Config:
     sim_seed: int = 1
 
     # ------------------------------------------------------------------------------------
+    def __post_init__(self):
+        """Derive the period counts that were left empty from the carrier and the target times."""
+        auto = set()
+        fd = float(self.ref_freq_hz)
+        if self.n_periods is None:
+            self.n_periods = int(min(100, max(1, round(self.integration_ms * fd / 1000.0))))
+            auto.add("n_periods")
+        if self.n_blank is None:
+            total = int(round(self.frame_ms * fd / 1000.0))
+            self.n_blank = int(min(100, max(self.min_blank_periods, total - self.n_periods)))
+            auto.add("n_blank")
+        if self.switch_after_periods is None:
+            # FrameSync rises at the frame centre; switch in the middle of the blank periods (VERIFY on a scope)
+            total = self.n_periods + self.n_blank
+            target = self.n_periods + self.n_blank // 2 if self.n_blank else total - 1
+            self.switch_after_periods = max(1, target - total // 2 + 1)
+            auto.add("switch_after_periods")
+        self._auto = frozenset(auto)
+
+    @property
+    def timing_auto(self) -> frozenset:
+        return getattr(self, "_auto", frozenset())
+
+    def with_carrier(self, freq_hz: float) -> "Config":
+        """Same config at another carrier, with the frame timing re-derived for it."""
+        return dataclasses.replace(self, ref_freq_hz=float(freq_hz), n_periods=None, n_blank=None,
+                                   switch_after_periods=None)
+
     @property
     def frame_period_s(self) -> float:
         return (self.n_periods + self.n_blank) / self.ref_freq_hz
@@ -119,8 +158,8 @@ class Config:
             p.append("n_periods must be 1..100")
         if not 0 <= self.n_blank <= 100:
             p.append("n_blank must be 0..100")
-        if self.ref_freq_hz < 306:
-            p.append("ref_freq_hz must be >= 306 Hz")
+        if not 306 <= self.ref_freq_hz <= 250000:
+            p.append("ref_freq_hz must be 306 Hz .. 250 kHz")
         if not 0.0 <= self.sensitivity <= 1.0:
             p.append("sensitivity must be 0..1")
         if self.coupling not in ("DC", "AC"):
@@ -144,8 +183,12 @@ class Config:
         return p
 
     # ---- (de)serialisation ------------------------------------------------------------
-    def to_dict(self) -> dict:
+    def to_dict(self, resolved: bool = False) -> dict:
+        """Derived period counts are written as None (so they re-derive) unless ``resolved``."""
         d = dataclasses.asdict(self)
+        if not resolved:
+            for k in self.timing_auto:
+                d[k] = None
         return {k: list(v) if isinstance(v, tuple) else v for k, v in d.items()}
 
     @classmethod
@@ -161,7 +204,9 @@ class Config:
         return cls(**kw)
 
     def replace(self, **kw) -> "Config":
-        return dataclasses.replace(self, **kw)
+        """Like dataclasses.replace, but derived period counts stay derived (re-computed)."""
+        keep_auto = {k: None for k in self.timing_auto if k not in kw}
+        return dataclasses.replace(self, **keep_auto, **kw)
 
     def dump_yaml(self) -> str:
         return yaml.safe_dump(self.to_dict(), sort_keys=False)
@@ -172,14 +217,25 @@ def load_config(path: Optional[str] = None, overrides: Optional[list[str]] = Non
     if path:
         with open(path, encoding="utf-8") as fh:
             d.update(yaml.safe_load(fh) or {})
-    cfg = Config.from_dict(d) if d else Config()
+    names = {f.name for f in dataclasses.fields(Config)}
     for item in overrides or []:
         key, _, raw = item.partition("=")
         key = key.strip()
-        if not hasattr(cfg, key):
+        if key not in names:
             raise KeyError(f"Unknown config key: {key}")
-        cfg = Config.from_dict({**cfg.to_dict(), key: _parse_value(raw.strip())})
-    return cfg
+        d[key] = _parse_value(raw.strip())
+    return Config.from_dict(d)
+
+
+def parse_frequency(text) -> float:
+    """'20k', '20 kHz', '1.5k', '20000' -> Hz."""
+    s = str(text).strip().lower().replace("hz", "").replace(" ", "")
+    mult = 1.0
+    if s.endswith("k"):
+        mult, s = 1e3, s[:-1]
+    elif s.endswith("m"):
+        mult, s = 1e6, s[:-1]
+    return float(s) * mult
 
 
 def _parse_value(raw: str):
