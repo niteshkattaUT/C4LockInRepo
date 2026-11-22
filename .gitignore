@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+*.h5
+*_traces.csv
+*_bursts.csv
+*_ppg.png
+*_view.png
+*.log

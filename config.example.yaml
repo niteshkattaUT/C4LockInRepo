@@ -1,0 +1,78 @@
+# Example config: every key with its default. Copy, keep only what you change, and pass with --config.
+# sim_* keys only matter with --sim.
+ref_freq_hz: 1000.0
+n_periods: 20
+n_blank: 2
+sensitivity: 0.15
+coupling: DC
+burst_frames: 100
+queue_blocks: 2
+reference_source: Internal
+reference_input: FI2
+expected_freq_dev_pct: 5
+frame_sync_line: RTIO2
+reference_line: RTIO3
+recording_active_line: null
+led_a_nm: 760
+led_b_nm: 850
+switch_after_periods: 11
+rois:
+  vessel:
+  - 256
+  - 276
+  - 230
+  - 250
+  background:
+  - 150
+  - 190
+  - 330
+  - 370
+ppg_window_s: 10.0
+ppg_min_window_s: 4.0
+ppg_band_hz:
+- 0.5
+- 5.0
+ppg_filter_order: 2
+ac_method: rms
+noise_correct: true
+noise_band_hz:
+- 6.0
+- 10.5
+history_s: 60.0
+alternation_min_contrast: 3.0
+alternation_min_match: 0.9
+auto_fix_swap: true
+sat_low: 0
+sat_high: 1023
+dc_sat_tol: 2
+offset_bursts: 3
+fetch_timeout_s: 10.0
+max_consecutive_timeouts: 3
+raw_q_max: 8
+view_q_max: 1
+write_q_max: 16
+save_dir: ./data
+save_raw: true
+compression: lzf
+controller: manual
+controller_baud: 115200
+sim_time_scale: 1.0
+sim_shape: null
+sim_heart_rate_bpm: 72.0
+sim_ppg_depth:
+  vessel:
+  - 0.012
+  - 0.007
+  tissue:
+  - 0.004
+  - 0.003
+sim_noise_counts: 2.0
+sim_room_light: 0.3
+sim_driver_phase_rad:
+- 0.6
+- 0.75
+sim_reset_miss_prob: 0.0
+sim_sync_miss_prob: 0.0
+sim_gap_s: 0.002
+sim_link_mb_s: 115.0
+sim_seed: 1
